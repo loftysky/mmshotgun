@@ -44,7 +44,6 @@ def make_thumbnail(path_to_movie, max_width=720, max_height=480, time=0.25):
         new_thumbnail.save('%s-thumbnail.jpg' %filename)
     return new_thumbnail
 
-make_thumbnail('youtube-test.mp4', max_width=620)
 
 def make_filmstrip(path_to_movie, max_frames=100, verbose=True):
     """Make a Shotgun filmstrip from the given media file.
@@ -138,7 +137,6 @@ def make_barcode(path_to_movie, width=854, height=480, verbose=True):
         barcode.save('barcode-%s.jpg' %filename, quality=90)
     return barcode
 
-#make_barcode('DO WHAT YOU CANT.mkv')
 def make_proxy(path_to_movie, path_to_mp4, force=False):
     """Prepare proxies that are suitable for Shotgun.
     
@@ -174,4 +172,4 @@ def make_proxy(path_to_movie, path_to_mp4, force=False):
         ])
         shutil.move(tmp_mp4, path_to_mp4)
 
-    
+
