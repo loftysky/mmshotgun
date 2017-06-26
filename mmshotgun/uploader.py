@@ -1,13 +1,17 @@
 import argparse
 import fcntl
+import functools
 import logging
 import os
-import sys
 import re
-import functools
+import socket
+import subprocess
+import sys
+import tempfile
 import threading
 import time
-import socket
+import contextlib
+import shutil
 
 from shotgun_api3_registry import connect
 
@@ -19,10 +23,78 @@ log = logging.getLogger(__name__)
 connect = functools.partial(connect, use_cache=False)
 
 
+MOVIE_EXTS = set('''
+    .mov
+    .mp4
+    .mkv
+    .avi
+'''.strip().split())
+
+IMAGE_EXTS = set('''
+    .jpg
+    .jpeg
+    .tga
+    .png
+'''.strip().split())
+
+
+
 def hard_timeout(timeout):
     time.sleep(timeout)
     print >> sys.stderr, 'HARD TIMEOUT; EXITING!'
     os._exit(1)
+
+
+@contextlib.contextmanager
+def temp_transcode(src, ext):
+
+    dir_ = tempfile.mkdtemp('mmshotgun.uploader')
+
+    name = os.path.splitext(os.path.basename(src))[0]
+    dst = os.path.join(dir_, name + ext)
+
+    if ext == '.mp4':
+        subprocess.check_call([
+            'ffmpeg',
+            '-i', src,
+            '-strict', 'experimental',
+            '-acodec', 'aac',
+                '-ab', '160k', '-ac', '2',
+            '-vcodec', 'libx264',
+                '-pix_fmt', 'yuv420p', '-vf', 'scale=trunc((a*oh)/2)*2:720',
+                '-g', '30', '-b:v', '2000k', '-vprofile', 'high', '-bf', '0',
+            '-f', 'mp4',
+            dst
+        ])
+
+    elif ext == '.webm':
+        yield
+        return
+        subprocess.check_call([
+            'ffmpeg',
+            '-i', src,
+            '-acodec', 'libvorbis',
+                '-aq', '60', '-ac', '2',
+            '-vcodec', 'libvpx',
+                '-pix_fmt', 'yuv420p', '-vf', 'scale=trunc((a*oh)/2)*2:720',
+                '-g', '30', '-b:v 2000k', '-vpre 720p',
+                #'-quality', 'realtime',
+                #'-cpu-used', '0', 
+                '-qmin', '10', '-qmax', '42',
+            '-f', 'webm',
+            dst
+        ])
+
+    else:
+        raise ValueError('Unknown ext', ext)
+
+    try:
+        yield dst
+    except:
+        raise
+    else:
+        shutil.rmtree(dir_)
+
 
 def main():
 
@@ -30,9 +102,18 @@ def main():
     parser.add_argument('-p', '--pid-file')
     parser.add_argument('-t', '--soft-timeout', type=float, default=30)
     parser.add_argument('-T', '--hard-timeout', type=float, default=30 * 60)
+    parser.add_argument('--no-transcode', action='store_true',
+        help="Upload the original without transcoding.")
     parser.add_argument('--since', nargs='?', default='1M',
         help="# HOURS|DAYS|WEEKS|MONTHS|YEARS")
+    parser.add_argument('-i', '--ids', action='store_true',
+        help="Only check the given IDs.")
+    parser.add_argument('id', nargs='*', type=int)
     args = parser.parse_args()
+
+    if args.ids and not args.id or (not args.ids and args.id):
+        parser.print_usage()
+        exit(1)
 
     # Set up soft and hard timeouts.
     socket.setdefaulttimeout(args.soft_timeout)
@@ -77,12 +158,12 @@ def main():
     }[since_unit[0]]
 
     try:
-        upload_changed_movies(since=(since_qty, since_unit))
+        upload_changed_movies(since=(since_qty, since_unit), ids=args.id, transcode=not args.no_transcode)
     except:
         log.exception('Error while uploading changed movies in last {:d} {}'.format(since_qty, since_unit.lower()))
 
 
-def upload_changed_movies(since=(1, 'MONTH')):
+def upload_changed_movies(since=(1, 'MONTH'), ids=None, transcode=True):
 
     sg = connect()
 
@@ -96,6 +177,10 @@ def upload_changed_movies(since=(1, 'MONTH')):
             'sg_path_to_movie',
             'sg_task',
             'sg_uploaded_movie',
+            'sg_uploaded_movie_mp4',
+            'sg_uploaded_movie_webm',
+            'sg_uploaded_movie_image',
+            'sg_uploaded_movie_frame_rate',
             'sg_uploaded_movie_transcoding_status',
         ], order=[
             {'field_name': 'created_at', 'direction': 'desc'},
@@ -105,6 +190,9 @@ def upload_changed_movies(since=(1, 'MONTH')):
     num_uploaded = 0
 
     for entity in entities:
+
+        if ids and entity['id'] not in ids:
+            continue
 
         if entity['sg_uploaded_movie'] is not None:
             continue
@@ -117,14 +205,14 @@ def upload_changed_movies(since=(1, 'MONTH')):
             continue
 
         try:
-            num_uploaded += int(bool(upload_movie(entity)))
+            num_uploaded += int(bool(upload_movie(entity, transcode=transcode)))
         except:
             log.exception('Error while uploading {type} {id}'.format(**entity))
 
     log.info('Checked {:d} entities; uploaded {:d} movies'.format(len(entities), num_uploaded))
 
 
-def upload_movie(entity, sg=None):
+def upload_movie(entity, transcode=True, sg=None):
 
     uploaded_movie = entity['sg_uploaded_movie']
     if uploaded_movie:
@@ -140,14 +228,43 @@ def upload_movie(entity, sg=None):
         log.warning('{type} {id} has a non existant movie at {sg_path_to_movie}; skipping'.format(**entity))
         return
 
-    log.info('Uploading {sg_path_to_movie} to {type} {id}...'.format(**entity))
-
-    name = os.path.splitext(os.path.basename(path_to_movie))[0]
+    name, ext = os.path.splitext(os.path.basename(path_to_movie))
 
     sg = sg or connect()
-    sg.upload(entity['type'], entity['id'], path_to_movie, 'sg_uploaded_movie', name)
+
+    if not transcode:
+        log.info('Uploading {sg_path_to_movie} to {type} {id}...'.format(**entity))
+        sg.upload(entity['type'], entity['id'], path_to_movie, 'sg_uploaded_movie', name)
+        return True
+
+    if ext in IMAGE_EXTS:
+        log.info('Uploading {sg_path_to_movie} to {type} {id} as image...'.format(**entity))
+        sg.upload(entity['type'], entity['id'], path_to_movie, 'sg_uploaded_movie_image', name)
+        return True
+
+    if ext not in MOVIE_EXTS:
+        log.warning('Cannot upload {sg_path_to_movie} from {type} {id}; not a movie.'.format(**entity))
+
+    if entity['sg_uploaded_movie_mp4']:
+        log.warning('{type} {id} already has an uploaded mp4; skipping'.format(**entity))
+    else:
+        log.info('Transcoding {sg_path_to_movie} to {type} {id} to mp4...'.format(**entity))
+        with temp_transcode(path_to_movie, '.mp4') as trancoded:
+            if trancoded:
+                log.info('Uploading {0} to {type} {id} as mp4...'.format(trancoded, **entity))
+                sg.upload(entity['type'], entity['id'], trancoded, 'sg_uploaded_movie_mp4', name)
+
+    if entity['sg_uploaded_movie_webm']:
+        log.warning('{type} {id} already has an uploaded mp4; skipping'.format(**entity))
+    else:
+        log.info('Transcoding {sg_path_to_movie} to {type} {id} to webm...'.format(**entity))
+        with temp_transcode(path_to_movie, '.webm') as trancoded:
+            if trancoded:
+                log.info('Uploading {0} to {type} {id} as webm...'.format(trancoded, **entity))
+                sg.upload(entity['type'], entity['id'], trancoded, 'sg_uploaded_movie_webm', name)
 
     return True
+
 
 
 
