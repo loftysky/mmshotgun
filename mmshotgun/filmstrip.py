@@ -1,10 +1,11 @@
-from sgfs import SGFS
-from av import time_base as AV_TIME_BASE
+from __future__ import division
 from PIL import Image, ImageDraw, ImageFont
 import av
 import os
+import shutil
+import subprocess
 
-sgfs = SGFS()
+debug = False
 
 def make_thumbnail(path_to_movie, max_width=720, max_height=480, time=0.25):
     """Make a thumbnail from the given media file.
@@ -17,20 +18,35 @@ def make_thumbnail(path_to_movie, max_width=720, max_height=480, time=0.25):
 
     """
     
-    # See: http://pillow.readthedocs.io/en/4.0.x/reference/Image.html#PIL.Image.Image.thumbnail
     container = av.open(path_to_movie)
-    filename, _ = os.path.basename(path_to_movie).split('.')
-    video_stream = next(s for s in container.streams if s.type == 'video')
-    target_duration = int(container.duration * time)
-    #target_timestamp = int((target_frame * AV_TIME_BASE) / video_stream.rate)
+    filename = os.path.splitext(os.path.basename(path_to_movie))[0]
+    video_stream = container.streams.get(video=0) #gets video stream at index 0
+    target_duration = int(container.duration * time) #casting to int b/c PYAV assumes that floats are seconds of time.
 
     container.seek(target_duration)
     one_frame = container.decode(video=0).next()
-    new_thumbnail = one_frame.reformat(width=max_width, height=max_height)
-    new_thumbnail.to_image().save('new_thumbnail-%s.jpg' %filename)
+    #use PIL to thumbails and it will retain aspect ratio 
+    one_thumbnail = one_frame.to_image()
+    if max_width and max_height:
+        if max_width > 720: 
+            max_width = 720
+        if max_height > 480: 
+            max_height = 480
+        wanted_ratio = float(max_height/max_width)
+        original_ratio = float(one_thumbnail.size[1]/one_thumbnail.size[0])
+        if wanted_ratio != original_ratio:
+            print "width and height selected not the same ratio as video. Adjusting accordingly."
+            hsize = (max_height/float(one_thumbnail.size[1]))
+            max_width = int((float(one_thumbnail.size[0])*float(hsize)))
+
+    new_thumbnail = one_thumbnail.resize((max_width, max_height), Image.ANTIALIAS)
+    if debug:
+        new_thumbnail.save('%s-thumbnail.jpg' %filename)
     return new_thumbnail
 
-def make_filmstrip(path_to_movie, max_frames=100):
+make_thumbnail('youtube-test.mp4', max_width=620)
+
+def make_filmstrip(path_to_movie, max_frames=100, verbose=True):
     """Make a Shotgun filmstrip from the given media file.
     
     A filmstrip is a horizontal strip of frames that are played when the user
@@ -45,39 +61,42 @@ def make_filmstrip(path_to_movie, max_frames=100):
     
     
     """
-    filename, _ = os.path.basename(path_to_movie).split('.')
+    filename = os.path.splitext(os.path.basename(path_to_movie))[0]
     container = av.open (path_to_movie)
-    video_stream = next(s for s in container.streams if s.type == 'video')
-    max_frames = min(video_stream.frames, 100)
+    video_stream = container.streams.get(video=0)
+    max_frames = min(video_stream.frames, 100) # getting < 100 frames for the filmstrip 
 
     delta = container.duration/max_frames
     next_time = 0
     container.seek(0)
     filmstrip = []
     basewidth = 240
-    frame = container.decode(video=0).next()
-    wpercent = (basewidth/float(frame.to_image().size[0]))
-    hsize = int((float(frame.to_image().size[1])*float(wpercent)))
 
 
     for i in range(max_frames):
         frame = container.decode(video=0).next()
-        resize_frame = frame.to_image().resize((basewidth, hsize))
+        if i == 0: 
+                frame = container.decode(video=0).next()
+                wpercent = (basewidth/float(frame.to_image().size[0]))
+                hsize = int((float(frame.to_image().size[1])*float(wpercent)))
+        resize_frame = frame.to_image().resize((basewidth, hsize))  
         filmstrip.append(resize_frame)
-        next_time += delta
-        print next_time, container.duration, i
         container.seek(next_time)
+        next_time = int(i * container.duration / max_frames)
+        if verbose: 
+            print 'seeking to', next_time, 'for', i, 'frames'
+        
 
     x=0
     composite = Image.new('RGB', (len(filmstrip) * basewidth,hsize), Image.ANTIALIAS)
     for i, frame in enumerate(filmstrip):
         composite.paste(frame, (x, 0))
         x += frame.size[0]
-        # See: https://github.com/mikeboers/PyAV/blob/master/examples/merge-filmstrip.py#L31-L38
-    composite.save('filmstrip-%s.jpg' %filename, quality=90)
+    if debug:
+        composite.save('filmstrip-%s.jpg' %filename, quality=90)
     return composite
 
-def make_barcode(path_to_movie, width=720, height=480):
+def make_barcode(path_to_movie, width=854, height=480, verbose=True):
     """Make a video barcode from the given media file.
     
     A video barcode is effectively every frame of the video laid end to end,
@@ -96,33 +115,37 @@ def make_barcode(path_to_movie, width=720, height=480):
     """
 
     container = av.open(path_to_movie) 
-    filename, _ = os.path.basename(path_to_movie).split('.')
+    filename = os.path.splitext(os.path.basename(path_to_movie))[0]
+
+    
     columns = []
     for frame in container.decode(video=0):
-        height = frame.to_image().size[1]
-        column = frame.to_image().resize((1, height), Image.ANTIALIAS)
+        frame_height = frame.to_image().size[1]
+        column = frame.to_image().resize((1, frame_height), Image.ANTIALIAS)
         columns.append(column)
-        print "resizing frame", frame.index
+        if verbose:
+            print "resizing frame", frame.index
 
     x = 0
-    composite = Image.new('RGB', (len(columns), height))
+    barcode = Image.new('RGB', (len(columns), frame_height))
     for i, column in enumerate(columns):
-        composite.paste(column, (x, 0))
-        print "pasting frame", i
+        barcode.paste(column, (x, 0))
+        if verbose: 
+            print "pasting frame", i
         x += column.size[0]
-    composite = composite.resize((width, height), Image.ANTIALIAS)
-    composite.save('barcode-%s.jpg' %filename, quality=90)
-    return composite
+    barcode = barcode.resize((width, height), Image.ANTIALIAS)
+    if debug:
+        barcode.save('barcode-%s.jpg' %filename, quality=90)
+    return barcode
 
-
-def make_proxy(path_to_movie, path_to_mp4, path_to_webm, force=False):
+#make_barcode('DO WHAT YOU CANT.mkv')
+def make_proxy(path_to_movie, path_to_mp4, force=False):
     """Prepare proxies that are suitable for Shotgun.
     
     See: https://support.shotgunsoftware.com/hc/en-us/articles/219030418-Do-it-yourself-DIY-transcoding
     
     :param str path_to_movie: The input movie.
     :param str path_to_mp4: The output H.264.
-    :param str path_to_webm: The output WebM.
     :param bool force: Create the outputs even if they already exist.
     
     """
@@ -132,7 +155,23 @@ def make_proxy(path_to_movie, path_to_mp4, path_to_webm, force=False):
     #tmp_mp4 = '%s.tmp-%s.mp4' % (path_to_mp4, os.urandom(2).encode('hex'))
     # use ffmpeg to create tmp_mp4
     #shtuil.move(tmp_mp4, path_to_mp4)
-    pass
-    
-  
+
+    src, ext = os.path.splitext(os.path.basename(path_to_movie))
+    tmp_mp4 = '%s.tmp-%s.mp4' % (src, os.urandom(2).encode('hex'))
+
+    if force = True: 
+        subprocess.check_call([
+            'ffmpeg',
+            '-i', src+ext,
+            '-strict', 'experimental',
+            '-acodec', 'aac',
+                '-ab', '160k', '-ac', '2',
+            '-vcodec', 'libx264',
+                '-pix_fmt', 'yuv420p', '-vf', 'scale=trunc((a*oh)/2)*2:720',
+                '-g', '30', '-b:v', '2000k', '-vprofile', 'high', '-bf', '0',
+            '-f', 'mp4',
+            tmp_mp4
+        ])
+        shutil.move(tmp_mp4, path_to_mp4)
+
     
