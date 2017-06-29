@@ -15,6 +15,8 @@ import shutil
 
 from shotgun_api3_registry import connect
 
+from . import filmstrip as process
+
 
 log = logging.getLogger(__name__)
 
@@ -61,10 +63,7 @@ def tempdir():
         shutil.rmtree(dir_)
 
 
-@contextlib.contextmanager
-def temp_transcode(src, ext):
-
-    dir_ = tempfile.mkdtemp('mmshotgun.uploader')
+def transcode(src, dir_, ext):
 
     name = os.path.splitext(os.path.basename(src))[0]
     dst = os.path.join(dir_, name + ext)
@@ -84,8 +83,6 @@ def temp_transcode(src, ext):
         ])
 
     elif ext == '.webm':
-        yield
-        return
         subprocess.check_call([
             'ffmpeg',
             '-i', src,
@@ -104,18 +101,18 @@ def temp_transcode(src, ext):
     else:
         raise ValueError('Unknown ext', ext)
 
-    try:
-        yield dst
-    except:
-        raise
-    else:
-        shutil.rmtree(dir_)
+    return dst
+
+
+def transcode_mp4(src, dir_):
+    return transcode(src, dir_, '.mp4')
 
 
 def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--pid-file')
+    parser.add_argument('-v', '--verbose', action='store_true')
     parser.add_argument('-t', '--soft-timeout', type=float, default=30)
     parser.add_argument('-T', '--hard-timeout', type=float, default=60 * 60)
     parser.add_argument('--no-transcode', action='store_true',
@@ -130,13 +127,14 @@ def main():
         help="Only check the given IDs.")
     parser.add_argument('id', nargs='*', type=int)
 
-
-
     args = parser.parse_args()
 
     if args.ids and not args.id or (not args.ids and args.id):
         parser.print_usage()
         exit(1)
+
+    if not logging.getLogger().handlers:
+        logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO)
 
     # Set up soft and hard timeouts.
     socket.setdefaulttimeout(args.soft_timeout)
@@ -181,12 +179,12 @@ def main():
     }[since_unit[0]]
 
     try:
-        upload_changed_movies(since=(since_qty, since_unit), ids=args.id, transcode=not args.no_transcode)
+        upload_changed_movies(since=(since_qty, since_unit), ids=args.id, transcode=not args.no_transcode, count=args.count)
     except:
         log.exception('Error while uploading changed movies in last {:d} {}'.format(since_qty, since_unit.lower()))
 
 
-def upload_changed_movies(since=(1, 'MONTH'), ids=None, transcode=True):
+def upload_changed_movies(since=(1, 'MONTH'), ids=None, transcode=True, count=0):
 
     sg = connect()
 
@@ -201,6 +199,8 @@ def upload_changed_movies(since=(1, 'MONTH'), ids=None, transcode=True):
             'sg_task',
             'image', # Thumbnail.
             'filmstrip_image',
+            'sg_barcode_file',
+            'sg_barcode_entity',
             'sg_uploaded_movie',
             'sg_uploaded_movie_mp4',
             'sg_uploaded_movie_webm',
@@ -227,7 +227,7 @@ def upload_changed_movies(since=(1, 'MONTH'), ids=None, transcode=True):
         except:
             log.exception('Error while uploading {type} {id}'.format(**entity))
 
-        if args.count and num_uploaded >= args.count:
+        if count and num_uploaded >= count:
             break
 
     log.info('Checked {:d} entities; uploaded {:d} movies'.format(num_checked, num_uploaded))
@@ -236,6 +236,7 @@ def upload_changed_movies(since=(1, 'MONTH'), ids=None, transcode=True):
 def upload_movie(entity, transcode=True, sg=None):
 
     log.info('Checking {type} {id} at: {sg_path_to_movie}'.format(**entity))
+    did_something = False
 
     # Something else uploaded the full movie.
     if entity['sg_uploaded_movie']:
@@ -260,7 +261,8 @@ def upload_movie(entity, transcode=True, sg=None):
         return
 
     name, ext = os.path.splitext(os.path.basename(path_to_movie))
-
+    ext_lower = ext.lower()
+    
     sg = sg or connect()
 
     # We used to not try so hard.
@@ -270,38 +272,67 @@ def upload_movie(entity, transcode=True, sg=None):
         return True
 
     # .. and we still don't for images or audio.
-    if ext in IMAGE_EXTS or ext in AUDIO_EXTS
+    if ext_lower in IMAGE_EXTS or ext_lower in AUDIO_EXTS:
         log.info("Uploading full file (because it is not a movie).")
         sg.upload(entity['type'], entity['id'], path_to_movie, 'sg_uploaded_movie', name)
         return True
 
-    if ext not in MOVIE_EXTS:
+    if ext_lower not in MOVIE_EXTS:
         log.warning("Not a movie file; skipping.")
         return
 
     # Start with thumbnails.
     if not entity['image']:
         log.info("Extracting thumbnail.")
-        img = 
+        img = process.make_thumbnail(path_to_movie)
         with tempdir() as dir_:
+            path = os.path.join(dir_, name + '.jpeg')
+            img.save(path)
+            log.info("Uploading thumbnail.")
+            sg.upload(entity['type'], entity['id'], path, 'thumb_image')
+        did_something = True
 
+    # Filmstrips.
+    if not entity['filmstrip_image']:
+        log.info("Extracting filmstrip.")
+        img = process.make_filmstrip(path_to_movie)
+        with tempdir() as dir_:
+            path = os.path.join(dir_, name + '.jpeg')
+            img.save(path)
+            log.info("Uploading filmstrip.")
+            sg.upload(entity['type'], entity['id'], path, 'filmstrip_thumb_image')
+        did_something = True
 
-    if entity['sg_uploaded_movie_mp4']:
-        log.warning('{type} {id} already has an uploaded mp4; skipping'.format(**entity))
-    else:
-        log.info('Transcoding {sg_path_to_movie} to {type} {id} to mp4...'.format(**entity))
-        with temp_transcode(path_to_movie, '.mp4') as trancoded:
-            if trancoded:
-                log.info('Uploading {0} to {type} {id} as mp4...'.format(trancoded, **entity))
-                sg.upload(entity['type'], entity['id'], trancoded, 'sg_uploaded_movie_mp4', name)
+    # Barcodes.
+    if not entity['sg_barcode_file']:
+        log.info("Extracting barcode.")
+        img = process.make_barcode(path_to_movie)
+        with tempdir() as dir_:
+            path = os.path.join(dir_, name + '.jpeg')
+            img.save(path)
+            log.info("Uploading barcode.")
+            id_ = sg.upload(entity['type'], entity['id'], path, 'sg_barcode_file')
+            entity['sg_barcode_file'] = {'type': 'Attachment', 'id': id_}
+            entity['sg_barcode_entity'] = None # Force it.
+        did_something = True
 
+    if not entity['sg_barcode_entity']:
+        log.info("Linking barcode.")
+        sg.update(entity['type'], entity['id'], {'sg_barcode_entity': entity['sg_barcode_file']})
+        did_something = True
 
-    return True
+    if not entity['sg_uploaded_movie_mp4']:
+        log.info("Transcoding mp4.")
+        with tempdir() as dir_:
+            transcoded = transcode_mp4(path_to_movie, dir_)
+            log.info("Uploading mp4.")
+            sg.upload(entity['type'], entity['id'], transcoded, 'sg_uploaded_movie_mp4')
+        did_something = True
+
+    return did_something
 
 
 
 
 if __name__ == '__main__':
-    if not logging.getLogger().handlers:
-        logging.basicConfig()
     main()
