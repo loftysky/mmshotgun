@@ -28,6 +28,11 @@ MOVIE_EXTS = set('''
     .mp4
     .mkv
     .avi
+    .mxf
+'''.strip().split())
+
+AUDIO_EXTS = set('''
+    .wav
 '''.strip().split())
 
 IMAGE_EXTS = set('''
@@ -43,6 +48,17 @@ def hard_timeout(timeout):
     time.sleep(timeout)
     print >> sys.stderr, 'HARD TIMEOUT; EXITING!'
     os._exit(1)
+
+
+@contextlib.contextmanager
+def tempdir():
+    dir_ = tempfile.mkdtemp('mmshotgun.uploader')
+    try:
+        yield dir_
+    except:
+        raise
+    else:
+        shutil.rmtree(dir_)
 
 
 @contextlib.contextmanager
@@ -101,14 +117,21 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('-p', '--pid-file')
     parser.add_argument('-t', '--soft-timeout', type=float, default=30)
-    parser.add_argument('-T', '--hard-timeout', type=float, default=30 * 60)
+    parser.add_argument('-T', '--hard-timeout', type=float, default=60 * 60)
     parser.add_argument('--no-transcode', action='store_true',
         help="Upload the original without transcoding.")
     parser.add_argument('--since', nargs='?', default='1M',
         help="# HOURS|DAYS|WEEKS|MONTHS|YEARS")
+
+    parser.add_argument('-c', '--count', type=int,
+        help="Only process this many versions.")
+
     parser.add_argument('-i', '--ids', action='store_true',
         help="Only check the given IDs.")
     parser.add_argument('id', nargs='*', type=int)
+
+
+
     args = parser.parse_args()
 
     if args.ids and not args.id or (not args.ids and args.id):
@@ -176,6 +199,8 @@ def upload_changed_movies(since=(1, 'MONTH'), ids=None, transcode=True):
             'created_at',
             'sg_path_to_movie',
             'sg_task',
+            'image', # Thumbnail.
+            'filmstrip_image',
             'sg_uploaded_movie',
             'sg_uploaded_movie_mp4',
             'sg_uploaded_movie_webm',
@@ -188,62 +213,78 @@ def upload_changed_movies(since=(1, 'MONTH'), ids=None, transcode=True):
     )
 
     num_uploaded = 0
+    num_checked = 0
 
     for entity in entities:
 
         if ids and entity['id'] not in ids:
             continue
 
-        if entity['sg_uploaded_movie'] is not None:
-            continue
-
-        if entity['sg_uploaded_movie_transcoding_status']:
-            # It has been uploaded, but is awaiting transcode.
-            # I'm not totally sure how this field works, but this is the safe
-            # assumption to make.
-            log.info('{type} {id} is transcoding'.format(**entity))
-            continue
+        num_checked += 1
 
         try:
             num_uploaded += int(bool(upload_movie(entity, transcode=transcode)))
         except:
             log.exception('Error while uploading {type} {id}'.format(**entity))
 
-    log.info('Checked {:d} entities; uploaded {:d} movies'.format(len(entities), num_uploaded))
+        if args.count and num_uploaded >= args.count:
+            break
+
+    log.info('Checked {:d} entities; uploaded {:d} movies'.format(num_checked, num_uploaded))
 
 
 def upload_movie(entity, transcode=True, sg=None):
 
-    uploaded_movie = entity['sg_uploaded_movie']
-    if uploaded_movie:
-        log.warning('{type} {id} already has an uploaded movie; skipping'.format(**entity))
+    log.info('Checking {type} {id} at: {sg_path_to_movie}'.format(**entity))
+
+    # Something else uploaded the full movie.
+    if entity['sg_uploaded_movie']:
+        log.warning("Already has an uploaded movie; skipping")
+        return
+
+    # ... and it is still transcoding.
+    if entity['sg_uploaded_movie_transcoding_status']:
+        # It has been uploaded, but is awaiting transcode.
+        # I'm not totally sure how this field works, but this is the safe
+        # assumption to make.
+        log.info("Already transcoding; skipping.")
         return
 
     path_to_movie = entity['sg_path_to_movie']
     if not path_to_movie:
-        log.warning('{type} {id} does not have a path to a movie; skipping'.format(**entity))
+        log.warning("Does not have a `sg_path_to_movie`; skipping.")
         return
 
     if not os.path.exists(path_to_movie):
-        log.warning('{type} {id} has a non existant movie at {sg_path_to_movie}; skipping'.format(**entity))
+        log.warning("`sg_path_to_movie` does not exist; skipping.")
         return
 
     name, ext = os.path.splitext(os.path.basename(path_to_movie))
 
     sg = sg or connect()
 
+    # We used to not try so hard.
     if not transcode:
-        log.info('Uploading {sg_path_to_movie} to {type} {id}...'.format(**entity))
+        log.info("Uploading full file (as requested).")
         sg.upload(entity['type'], entity['id'], path_to_movie, 'sg_uploaded_movie', name)
         return True
 
-    if ext in IMAGE_EXTS:
-        log.info('Uploading {sg_path_to_movie} to {type} {id} as image...'.format(**entity))
-        sg.upload(entity['type'], entity['id'], path_to_movie, 'sg_uploaded_movie_image', name)
+    # .. and we still don't for images or audio.
+    if ext in IMAGE_EXTS or ext in AUDIO_EXTS
+        log.info("Uploading full file (because it is not a movie).")
+        sg.upload(entity['type'], entity['id'], path_to_movie, 'sg_uploaded_movie', name)
         return True
 
     if ext not in MOVIE_EXTS:
-        log.warning('Cannot upload {sg_path_to_movie} from {type} {id}; not a movie.'.format(**entity))
+        log.warning("Not a movie file; skipping.")
+        return
+
+    # Start with thumbnails.
+    if not entity['image']:
+        log.info("Extracting thumbnail.")
+        img = 
+        with tempdir() as dir_:
+
 
     if entity['sg_uploaded_movie_mp4']:
         log.warning('{type} {id} already has an uploaded mp4; skipping'.format(**entity))
@@ -254,14 +295,6 @@ def upload_movie(entity, transcode=True, sg=None):
                 log.info('Uploading {0} to {type} {id} as mp4...'.format(trancoded, **entity))
                 sg.upload(entity['type'], entity['id'], trancoded, 'sg_uploaded_movie_mp4', name)
 
-    if entity['sg_uploaded_movie_webm']:
-        log.warning('{type} {id} already has an uploaded mp4; skipping'.format(**entity))
-    else:
-        log.info('Transcoding {sg_path_to_movie} to {type} {id} to webm...'.format(**entity))
-        with temp_transcode(path_to_movie, '.webm') as trancoded:
-            if trancoded:
-                log.info('Uploading {0} to {type} {id} as webm...'.format(trancoded, **entity))
-                sg.upload(entity['type'], entity['id'], trancoded, 'sg_uploaded_movie_webm', name)
 
     return True
 
