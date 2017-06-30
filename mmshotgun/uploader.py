@@ -12,6 +12,7 @@ import threading
 import time
 import contextlib
 import shutil
+import time
 
 from shotgun_api3_registry import connect
 
@@ -111,7 +112,9 @@ def transcode_mp4(src, dir_):
 def main():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument('-p', '--pid-file')
+    parser.add_argument('--pid-file')
+    parser.add_argument('-p', '--include-project', type=int, action='append')
+    parser.add_argument('-P', '--exclude-project', type=int, action='append')
     parser.add_argument('-v', '--verbose', action='store_true')
     parser.add_argument('-t', '--soft-timeout', type=float, default=30)
     parser.add_argument('-T', '--hard-timeout', type=float, default=60 * 60)
@@ -179,21 +182,31 @@ def main():
     }[since_unit[0]]
 
     try:
-        upload_changed_movies(since=(since_qty, since_unit), ids=args.id, transcode=not args.no_transcode, count=args.count)
+        upload_changed_movies(since=(since_qty, since_unit), ids=args.id, include_project=args.include_project, exclude_project=args.exclude_project, transcode=not args.no_transcode, count=args.count, max_time=args.hard_timeout / 2)
     except:
         log.exception('Error while uploading changed movies in last {:d} {}'.format(since_qty, since_unit.lower()))
 
 
-def upload_changed_movies(since=(1, 'MONTH'), ids=None, transcode=True, count=0):
+def upload_changed_movies(since=(1, 'MONTH'), ids=None, include_project=None, exclude_project=None, transcode=True, count=0, max_time=0):
+    
+    start_time = time.time()
 
     sg = connect()
 
+    filters = [
+        ('created_at', 'in_last', since[0], since[1]),
+        ('sg_path_to_movie', 'is_not', None),
+    ]
+
+    if include_project:
+        filters.append(('project', 'in', [{'type': 'Project', 'id': i} for i in include_project]))
+    if exclude_project:
+        filters.append(('project', 'not_in', [{'type': 'Project', 'id': i} for i in exclude_project]))
+
     log.info('Retrieving versions in last {:d} {}...'.format(since[0], since[1].lower()))
     entities = sg.find("Version",
-        filters=[
-            ('created_at', 'in_last', since[0], since[1]),
-            ('sg_path_to_movie', 'is_not', None),
-        ], fields=[
+        filters=filters,
+        fields=[
             'created_at',
             'sg_path_to_movie',
             'sg_task',
@@ -229,6 +242,9 @@ def upload_changed_movies(since=(1, 'MONTH'), ids=None, transcode=True, count=0)
 
         if count and num_uploaded >= count:
             break
+        if max_time and (time.time() - start_time) > max_time:
+            log.info("Passed half of hard-timeout; stopping.")
+            break
 
     log.info('Checked {:d} entities; uploaded {:d} movies'.format(num_checked, num_uploaded))
 
@@ -240,7 +256,7 @@ def upload_movie(entity, transcode=True, sg=None):
 
     # Something else uploaded the full movie.
     if entity['sg_uploaded_movie']:
-        log.warning("Already has an uploaded movie; skipping")
+        log.debug("Already has an uploaded movie; skipping")
         return
 
     # ... and it is still transcoding.
@@ -253,11 +269,11 @@ def upload_movie(entity, transcode=True, sg=None):
 
     path_to_movie = entity['sg_path_to_movie']
     if not path_to_movie:
-        log.warning("Does not have a `sg_path_to_movie`; skipping.")
+        log.debug("Does not have a `sg_path_to_movie`; skipping.")
         return
 
     if not os.path.exists(path_to_movie):
-        log.warning("`sg_path_to_movie` does not exist; skipping.")
+        log.info("`sg_path_to_movie` does not exist; skipping.")
         return
 
     name, ext = os.path.splitext(os.path.basename(path_to_movie))
