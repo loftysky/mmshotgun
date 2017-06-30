@@ -73,24 +73,31 @@ def make_filmstrip(path_to_movie, max_frames=100):
 
     for i in range(max_frames):
 
+        if i and not i % 10:
+            log.debug("Grabbing frame %s for filmstrip.", i)
+
         next_cts = int(i * container.duration / (max_frames - 1))
-        
-        if not tiny_file:
-            container.seek(next_cts)
-
         next_pts = int(float(next_cts - max_diff) / av.time_base / stream.time_base)
+        
+        frame = None
 
-        for j, frame in enumerate(container.decode(video=0)):
+        try:
+            if not tiny_file:
+                container.seek(next_cts)
+            for j, frame in enumerate(container.decode(video=0)):
+                if not j and not tiny_file and last_pts and last_pts >= frame.pts:
+                    tiny_file = True
+                    log.info("File is small enough that we won't bother seeking.")
+                if frame.pts >= next_pts:
+                    break
+            else:
+                log.info("Scanned rest of file after seek.")
+        except av.AVError:
+            log.exception("Error while seeking and decoding.")
 
-            if not j and not tiny_file and last_pts and last_pts >= frame.pts:
-                tiny_file = True
-                log.info("File is small enough that we won't bother seeking.")
-
-            if frame.pts >= next_pts:
-                break
-            
-        else:
-            log.info("Scanned rest of file after seek.")
+        # TODO: Assert the above was an EOF.
+        if not frame:
+            break
 
         seek_skip_count += j
         last_pts = frame.pts
@@ -117,7 +124,7 @@ def make_filmstrip(path_to_movie, max_frames=100):
     return composite
 
 
-def make_barcode(path_to_movie, width=1280, height=480):
+def make_barcode(path_to_movie, width=720, height=480):
     """Make a video barcode from the given media file.
     
     A video barcode is effectively every frame of the video laid end to end,
