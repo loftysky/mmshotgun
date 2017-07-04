@@ -118,6 +118,7 @@ def main():
     parser.add_argument('-v', '--verbose', action='store_true')
     parser.add_argument('-t', '--soft-timeout', type=float, default=30)
     parser.add_argument('-T', '--hard-timeout', type=float, default=60 * 60)
+    parser.add_argument('--no-mp4', action='store_true')
     parser.add_argument('--no-transcode', action='store_true',
         help="Upload the original without transcoding.")
     parser.add_argument('--since', nargs='?', default='1M',
@@ -182,12 +183,12 @@ def main():
     }[since_unit[0]]
 
     try:
-        upload_changed_movies(since=(since_qty, since_unit), ids=args.id, include_project=args.include_project, exclude_project=args.exclude_project, transcode=not args.no_transcode, count=args.count, max_time=args.hard_timeout / 2)
+        upload_changed_movies(since=(since_qty, since_unit), ids=args.id, include_project=args.include_project, exclude_project=args.exclude_project, mp4=not args.no_mp4, transcode=not args.no_transcode, count=args.count, max_time=args.hard_timeout / 2)
     except:
         log.exception('Error while uploading changed movies in last {:d} {}'.format(since_qty, since_unit.lower()))
 
 
-def upload_changed_movies(since=(1, 'MONTH'), ids=None, include_project=None, exclude_project=None, transcode=True, count=0, max_time=0):
+def upload_changed_movies(since=(1, 'MONTH'), ids=None, include_project=None, exclude_project=None, mp4=True, transcode=True, count=0, max_time=0):
     
     start_time = time.time()
 
@@ -236,7 +237,7 @@ def upload_changed_movies(since=(1, 'MONTH'), ids=None, include_project=None, ex
         num_checked += 1
 
         try:
-            num_uploaded += int(bool(upload_movie(entity, transcode=transcode)))
+            num_uploaded += int(bool(upload_movie(entity, mp4=mp4, transcode=transcode)))
         except:
             log.exception('Error while uploading {type} {id}'.format(**entity))
 
@@ -249,7 +250,7 @@ def upload_changed_movies(since=(1, 'MONTH'), ids=None, include_project=None, ex
     log.info('Checked {:d} entities; uploaded {:d} movies'.format(num_checked, num_uploaded))
 
 
-def upload_movie(entity, transcode=True, sg=None):
+def upload_movie(entity, mp4=True, transcode=True, sg=None):
 
     log.info('Checking {type} {id} at: {sg_path_to_movie}'.format(**entity))
     did_something = False
@@ -337,7 +338,7 @@ def upload_movie(entity, transcode=True, sg=None):
         sg.update(entity['type'], entity['id'], {'sg_barcode_entity': entity['sg_barcode_file']})
         did_something = True
 
-    if not entity['sg_uploaded_movie_mp4']:
+    if mp4 and not entity['sg_uploaded_movie_mp4']:
         log.info("Transcoding mp4.")
         with tempdir() as dir_:
             transcoded = transcode_mp4(path_to_movie, dir_)
