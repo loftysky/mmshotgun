@@ -16,10 +16,28 @@ import time
 
 from shotgun_api3_registry import connect
 
+from dirmap import DirMap
+
 from . import filmstrip as process
 
 
 log = logging.getLogger(__name__)
+
+
+
+dir_map = DirMap()
+dir_map.add_existing('''
+    /Volumes/EditOnline/CWAF_S3/01_Raw_Source
+    /Volumes/EDsource/Projects/ConfuciusWasAFoodieS3/footage/camera_originals
+'''.strip().split())
+dir_map.add_existing('''
+    /Volumes/EditOnline/CWAF_S3/02_0ptimized_Source
+    /Volumes/EDsource/Projects/ConfuciusWasAFoodieS3/footage/source
+'''.strip().split())
+dir_map.add_existing('''
+    /Volumes/EDsource/Projects/ConfuciusWasAFoodieS3
+    /Volumes/EDsource/Projects/CWAF
+'''.strip().split())
 
 
 # Deactivate our use of the cache.
@@ -269,6 +287,7 @@ def upload_movie(entity, mp4=True, transcode=True, sg=None):
         return
 
     path_to_movie = entity['sg_path_to_movie']
+    path_to_movie = dir_map(path_to_movie)
     if not path_to_movie:
         log.debug("Does not have a `sg_path_to_movie`; skipping.")
         return
