@@ -20,6 +20,9 @@ setup(
         'console_scripts': '''
             mmshotgun-uploader = mmshotgun.uploader:main
         ''',
+        'sgfs_schema_locators': '''
+            mmshotgun = mmshotgun.sgfs:locate_schema
+        ''',
     },
 
     author='Mike Boers',

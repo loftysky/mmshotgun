@@ -1,0 +1,5 @@
+name_expr: '"books/" + self["code"]'
+
+children:
+    CustomEntity04: BookIssue.yml
+
