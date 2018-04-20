@@ -11,6 +11,7 @@ steps_to_include:
         - fx
         - layout
         - light
+        - matte_painting
         - render
 
 templates:
