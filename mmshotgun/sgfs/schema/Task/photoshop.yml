@@ -3,8 +3,10 @@ condition: self['step']['short_name'] in steps_to_include.get(self['step']['enti
 steps_to_include:
 
     Asset:
-        - texture
+        - matte_painting
         - surface
+        - texture
+        
     Shot:
         - art
         - matte_painting
@@ -12,6 +14,6 @@ steps_to_include:
 
     # BookPage
     CustomEntity21:
-        - layout
         - colour
+        - layout
 
